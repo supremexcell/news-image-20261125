@@ -7,10 +7,11 @@
 // bytes it writes are always the bytes of entry.png.
 //
 // Safety: before copying, it checks that entry.png really is a 1024x1024
-// PNG (magic bytes + IHDR dimensions) and that its sha256 is exactly the
-// hash of the approved image. After copying, it reads the output back and
-// checks the hash again, so a truncated or altered copy can never reach
-// the judge.
+// PNG (magic bytes + IHDR dimensions + a well-formed chunk chain carrying
+// at least one IDAT chunk + the IEND trailer) and that its sha256 is
+// exactly the hash of the approved image. After copying, it reads the
+// output back and checks the hash again, so a truncated or altered copy
+// can never reach the judge.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
@@ -57,6 +58,25 @@ function readApprovedImage(): Buffer {
   ]);
   if (bytes.length < 12 || !bytes.subarray(bytes.length - 12).equals(IEND_TRAILER)) {
     throw new Error('entry.png has no IEND trailer where one belongs');
+  }
+  // Walk the chunk chain: every chunk must end inside the file, and the
+  // file must carry at least one IDAT chunk. This catches a file spliced
+  // together from two PNGs, or one with a lying chunk length, even when
+  // the magic, IHDR and IEND all look right on their own.
+  let offset = 8;
+  let seenIdat = false;
+  while (offset + 8 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.subarray(offset + 4, offset + 8).toString('ascii');
+    if (offset + 12 + length > bytes.length) {
+      throw new Error(`entry.png chunk ${type} runs past the end of the file`);
+    }
+    if (type === 'IDAT') seenIdat = true;
+    if (type === 'IEND') break;
+    offset += 12 + length;
+  }
+  if (!seenIdat) {
+    throw new Error('entry.png has no IDAT chunk — it carries no image data');
   }
   if (sha256Hex(bytes) !== APPROVED_SHA256) {
     throw new Error(
